@@ -157,19 +157,36 @@ func fetchAllPageLinksConcurrently(providerName, grepStr string, numPages, concu
 	return all
 }
 
-// Main concurrent page scraping logic
-func GetAllPages(providerName string, grepStr string) []models.QuestionData {
-	baseURL := fmt.Sprintf("https://www.examtopics.com/discussions/%s/", providerName)
-	numPages := getMaxNumPages(baseURL)
-	fmt.Printf("Fetching %d pages for provider '%s'\n", numPages, providerName)
+func normalizeQuestionLink(link string) string {
+	return strings.TrimSuffix(strings.TrimSpace(link), "/")
+}
 
-	allLinks := fetchAllPageLinksConcurrently(providerName, grepStr, numPages, constants.MaxConcurrentRequests)
+func mergeQuestionData(existing, missing []models.QuestionData) []models.QuestionData {
+	seen := make(map[string]struct{}, len(existing)+len(missing))
+	merged := make([]models.QuestionData, 0, len(existing)+len(missing))
 
-	unique := utils.DeduplicateLinks(allLinks)
-	sortedLinks := utils.SortLinksByQuestionNumber(unique)
+	for _, q := range existing {
+		norm := normalizeQuestionLink(q.QuestionLink)
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		merged = append(merged, q)
+	}
 
-	fmt.Printf("Found %d unique matching links:\n", len(sortedLinks))
+	for _, q := range missing {
+		norm := normalizeQuestionLink(q.QuestionLink)
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		merged = append(merged, q)
+	}
 
+	return utils.SortQuestionDataByPageNumber(merged)
+}
+
+func fetchDataForLinks(sortedLinks []string) []models.QuestionData {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, constants.MaxConcurrentRequests)
 	results := make([]*models.QuestionData, len(sortedLinks))
@@ -200,7 +217,7 @@ func GetAllPages(providerName string, grepStr string) []models.QuestionData {
 
 	wg.Wait()
 	bar.Finish()
-	// Filter out nil entries
+
 	var finalData []models.QuestionData
 	for _, entry := range results {
 		if entry != nil {
@@ -209,6 +226,56 @@ func GetAllPages(providerName string, grepStr string) []models.QuestionData {
 	}
 
 	fmt.Printf("Scraping completed in %s.\n", utils.TimeSince(startTime))
-
 	return finalData
+}
+
+// BackfillMissingCachedPages makes cached mode safe by fetching any links that are missing from cache.
+func BackfillMissingCachedPages(providerName, grepStr string, cached []models.QuestionData) []models.QuestionData {
+	if len(cached) == 0 {
+		return cached
+	}
+
+	baseURL := fmt.Sprintf("https://www.examtopics.com/discussions/%s/", providerName)
+	numPages := getMaxNumPages(baseURL)
+	fmt.Printf("Verifying cached completeness across %d pages for provider '%s'\n", numPages, providerName)
+
+	allLinks := fetchAllPageLinksConcurrently(providerName, grepStr, numPages, constants.MaxConcurrentRequests)
+	unique := utils.DeduplicateLinks(allLinks)
+	sortedLinks := utils.SortLinksByQuestionNumber(unique)
+
+	cachedSet := make(map[string]struct{}, len(cached))
+	for _, q := range cached {
+		cachedSet[normalizeQuestionLink(q.QuestionLink)] = struct{}{}
+	}
+
+	missingLinks := make([]string, 0)
+	for _, rel := range sortedLinks {
+		full := normalizeQuestionLink(utils.AddToBaseUrl(rel))
+		if _, ok := cachedSet[full]; !ok {
+			missingLinks = append(missingLinks, rel)
+		}
+	}
+
+	if len(missingLinks) == 0 {
+		fmt.Printf("Cache verification complete: no missing links (total %d).\n", len(cached))
+		return utils.SortQuestionDataByPageNumber(cached)
+	}
+
+	fmt.Printf("Cache incomplete: %d missing links found, fetching missing data...\n", len(missingLinks))
+	missingData := fetchDataForLinks(missingLinks)
+	return mergeQuestionData(cached, missingData)
+}
+
+// Main concurrent page scraping logic
+func GetAllPages(providerName string, grepStr string) []models.QuestionData {
+	baseURL := fmt.Sprintf("https://www.examtopics.com/discussions/%s/", providerName)
+	numPages := getMaxNumPages(baseURL)
+	fmt.Printf("Fetching %d pages for provider '%s'\n", numPages, providerName)
+
+	allLinks := fetchAllPageLinksConcurrently(providerName, grepStr, numPages, constants.MaxConcurrentRequests)
+	unique := utils.DeduplicateLinks(allLinks)
+	sortedLinks := utils.SortLinksByQuestionNumber(unique)
+
+	fmt.Printf("Found %d unique matching links:\n", len(sortedLinks))
+	return fetchDataForLinks(sortedLinks)
 }

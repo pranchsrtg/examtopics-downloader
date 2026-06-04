@@ -38,8 +38,10 @@ func main() {
 	if !*noCache {
 		links := fetch.GetCachedPages(*provider, *grepStr, *token)
 		if len(links) > 0 {
+			// Guarantee complete output: verify cache and backfill any missing links from live pages.
+			links = fetch.BackfillMissingCachedPages(*provider, *grepStr, links)
 			utils.WriteData(links, *outputPath, *commentBool, *fileType)
-			fmt.Printf("Successfully saved cached output to %s (filetype: %s).\n", *outputPath, *fileType)
+			fmt.Printf("Successfully saved cached+verified output to %s (filetype: %s).\n", *outputPath, *fileType)
 			os.Exit(0)
 		}
 	}
